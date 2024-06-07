@@ -1,21 +1,23 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all, clippy::pedantic)]
 
+use s3s_basin::BasinWallet;
 use std::io::IsTerminal;
-use std::net::TcpListener;
 use std::path::PathBuf;
-use std::str::FromStr;
+use tokio::net::TcpListener;
 
-use clap::{CommandFactory, Parser};
-use hyper::server::Server;
+use adm_provider::json_rpc::JsonRpcProvider;
+use adm_sdk::network::Network as SdkNetwork;
+use adm_signer::{key::parse_secret_key, AccountKind, Wallet};
+use clap::{CommandFactory, Parser, ValueEnum};
+use fendermint_crypto::SecretKey;
 use s3s::auth::SimpleAuth;
 use s3s::service::S3ServiceBuilder;
-use tendermint_rpc::Url;
+use s3s_basin::Basin;
 use tracing::info;
 
-use s3s_ipc::fendermint::{AccountKind, BroadcastMode, TransArgs};
-use s3s_ipc::Ipc;
-use s3s_ipc::Result;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as ConnBuilder;
 
 #[derive(Debug, Parser)]
 #[command(version)]
@@ -28,9 +30,13 @@ struct Opt {
     #[arg(long, default_value = "8014")] // The original design was finished on 2020-08-14.
     port: u16,
 
-    /// Private key used with Fendermint.
-    #[arg(long)]
-    private_key: PathBuf,
+    /// Network presets for subnet and RPC URLs.
+    #[arg(short, long, value_enum, default_value_t = Network::Testnet)]
+    network: Network,
+
+    /// Wallet private key (ECDSA, secp256k1) for signing transactions.
+    #[arg(short, long, value_parser = parse_secret_key)]
+    private_key: Option<SecretKey>,
 
     /// Access key used for authentication.
     #[arg(long)]
@@ -43,9 +49,6 @@ struct Opt {
     /// Domain name used for virtual-hosted-style requests.
     #[arg(long)]
     domain_name: Option<String>,
-
-    /// Root directory of stored data.
-    root: PathBuf,
 }
 
 fn setup_tracing() {
@@ -80,7 +83,7 @@ fn check_cli_args(opt: &Opt) {
     }
 }
 
-fn main() -> Result {
+fn main() -> anyhow::Result<()> {
     let opt = Opt::parse();
     check_cli_args(&opt);
 
@@ -90,25 +93,30 @@ fn main() -> Result {
 }
 
 #[tokio::main]
-async fn run(opt: Opt) -> Result {
-    // Setup S3 provider
-    let url = Url::from_str("http://127.0.0.1:26657").unwrap();
-    let args = TransArgs {
-        chain_name: "test".to_string(),
-        value: Default::default(),
-        secret_key: opt.private_key,
-        account_kind: AccountKind::Regular,
-        sequence: 0,
-        gas_limit: 10_000_000_000,
-        gas_fee_cap: Default::default(),
-        gas_premium: Default::default(),
-        broadcast_mode: BroadcastMode::Commit,
+async fn run(opt: Opt) -> anyhow::Result<()> {
+    opt.network.get().init();
+
+    let network = opt.network.get();
+
+    // Setup network provider
+    let provider =
+        JsonRpcProvider::new_http(network.rpc_url()?, None, Some(network.object_api_url()?))?;
+
+    let root = PathBuf::from("/Users/brunocalza/projects/s3-ipc");
+    let basin = match opt.private_key {
+        Some(sk) => {
+            // Setup local wallet using private key from arg
+            let mut wallet =
+                Wallet::new_secp256k1(sk, AccountKind::Ethereum, network.subnet_id()?)?;
+            wallet.init_sequence(&provider).await?;
+            Basin::new(root, provider, Some(BasinWallet::new(wallet)))?
+        }
+        None => Basin::new(root, provider, None)?,
     };
-    let ipc = Ipc::new(opt.root, url, args)?;
 
     // Setup S3 service
     let service = {
-        let mut b = S3ServiceBuilder::new(ipc);
+        let mut b = S3ServiceBuilder::new(basin);
 
         // Enable authentication
         if let (Some(ak), Some(sk)) = (opt.access_key, opt.secret_key) {
@@ -126,18 +134,73 @@ async fn run(opt: Opt) -> Result {
     };
 
     // Run server
-    let listener = TcpListener::bind((opt.host.as_str(), opt.port))?;
+    let listener = TcpListener::bind((opt.host.as_str(), opt.port)).await?;
     let local_addr = listener.local_addr()?;
 
-    let server = Server::from_tcp(listener)?.serve(service.into_shared().into_make_service());
+    let hyper_service = service.into_shared();
+
+    let http_server = ConnBuilder::new(TokioExecutor::new());
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+
+    let mut ctrl_c = std::pin::pin!(tokio::signal::ctrl_c());
 
     info!("server is running at http://{local_addr}");
-    server.with_graceful_shutdown(shutdown_signal()).await?;
+
+    loop {
+        let (socket, _) = tokio::select! {
+            res =  listener.accept() => {
+                match res {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        tracing::error!("error accepting connection: {err}");
+                        continue;
+                    }
+                }
+            }
+            _ = ctrl_c.as_mut() => {
+                break;
+            }
+        };
+
+        let conn = http_server.serve_connection(TokioIo::new(socket), hyper_service.clone());
+        let conn = graceful.watch(conn.into_owned());
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+    }
+
+    tokio::select! {
+        () = graceful.shutdown() => {
+             tracing::debug!("Gracefully shutdown!");
+        },
+        () = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+             tracing::debug!("Waited 10 seconds for graceful shutdown, aborting...");
+        }
+    }
 
     info!("server is stopped");
     Ok(())
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum Network {
+    /// Network presets for mainnet.
+    Mainnet,
+    /// Network presets for Calibration (default pre-mainnet).
+    Testnet,
+    /// Network presets for a local three-node network.
+    Localnet,
+    /// Network presets for local development.
+    Devnet,
+}
+
+impl Network {
+    pub fn get(&self) -> SdkNetwork {
+        match self {
+            Network::Mainnet => SdkNetwork::Mainnet,
+            Network::Testnet => SdkNetwork::Testnet,
+            Network::Localnet => SdkNetwork::Localnet,
+            Network::Devnet => SdkNetwork::Devnet,
+        }
+    }
 }
