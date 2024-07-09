@@ -10,6 +10,7 @@ use futures::TryStreamExt;
 use md5::Md5;
 use s3s::S3Error;
 use s3s::S3ErrorCode;
+use std::collections::HashMap;
 use std::ops::Not;
 use tendermint_rpc::Client;
 use tokio::fs;
@@ -17,11 +18,11 @@ use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
+use adm_provider::message::GasParams;
 use adm_sdk::machine::objectstore::GetOptions;
 use adm_sdk::machine::objectstore::ObjectStore;
 use adm_sdk::machine::Machine;
 use fendermint_actor_machine::WriteAccess;
-use fendermint_actor_objectstore::ObjectListItem;
 use fvm_shared::address::Address;
 use md5::Digest;
 use s3s::dto::*;
@@ -30,12 +31,15 @@ use s3s::S3Result;
 use s3s::S3;
 use s3s::{S3Request, S3Response};
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::utils::bytes_stream;
 use crate::utils::copy_bytes;
 use crate::utils::hex;
 use crate::Basin;
+
+static LAST_MODIFIED_METADATA_KEY: &str = "last_modified";
 
 #[async_trait::async_trait]
 impl<C> S3 for Basin<C>
@@ -134,13 +138,20 @@ where
         let address = try_!(Address::from_str(bucket.as_str()));
         let machine = ObjectStore::attach(address);
 
-        let tx = machine
+        let last_modified = try_!(SystemTime::now().duration_since(UNIX_EPOCH)).as_secs();
+        let _ = machine
             .add(
                 &self.provider,
                 &mut wallet,
                 &key,
                 file,
-                AddOptions::default(),
+                AddOptions {
+                    metadata: HashMap::from([(
+                        LAST_MODIFIED_METADATA_KEY.to_string(),
+                        last_modified.to_string(),
+                    )]),
+                    ..AddOptions::default()
+                },
             )
             .await
             .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
@@ -148,7 +159,6 @@ where
         let output = CompleteMultipartUploadOutput {
             bucket: Some(bucket),
             key: Some(key),
-            //e_tag: Some(format!("\"{md5_sum}\"")),
             ..Default::default()
         };
         Ok(S3Response::new(output))
@@ -206,21 +216,30 @@ where
         let address = try_!(Address::from_str(&dst_bucket));
         let machine = ObjectStore::attach(address);
 
+        let last_modified = try_!(SystemTime::now().duration_since(UNIX_EPOCH)).as_secs();
         let _ = machine
             .add(
                 &self.provider,
                 &mut wallet,
                 &dst_key,
                 file,
-                AddOptions::default(),
+                AddOptions {
+                    metadata: HashMap::from([(
+                        LAST_MODIFIED_METADATA_KEY.to_string(),
+                        last_modified.to_string(),
+                    )]),
+                    ..AddOptions::default()
+                },
             )
             .await
             .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let copy_object_result = CopyObjectResult {
-            //e_tag: Some(format!("\"{md5_sum}\"")),
-            last_modified: Timestamp::parse(TimestampFormat::DateTime, "1985-04-12T23:20:50.520Z")
-                .ok(),
+            last_modified: Timestamp::parse(
+                TimestampFormat::EpochSeconds,
+                last_modified.to_string().as_str(),
+            )
+            .ok(),
             ..Default::default()
         };
 
@@ -252,7 +271,7 @@ where
             &self.provider,
             &mut wallet,
             WriteAccess::OnlyOwner,
-            Default::default(),
+            GasParams::default(),
         )
         .await
         .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
@@ -385,18 +404,14 @@ where
             .await
             .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
-        let object_item = if let Some(object) = object_list.objects.into_iter().next() {
+        let object = if let Some(object) = object_list.objects.into_iter().next() {
             object.1
         } else {
             return Err(s3_error!(NoSuchKey));
         };
 
-        let file_len = match object_item {
-            ObjectListItem::Internal((_, size)) => size,
-            _ => {
-                unimplemented!("external object")
-            }
-        };
+        let file_len = object.size as u64;
+
         let (content_length, content_range) = match input.range {
             None => (file_len, None),
             Some(range) => {
@@ -439,12 +454,16 @@ where
             .await
             .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
+        let last_modified = object
+            .metadata
+            .get(LAST_MODIFIED_METADATA_KEY)
+            .map(|v| Timestamp::parse(TimestampFormat::EpochSeconds, v.as_str()).unwrap());
+
         let output = GetObjectOutput {
             body: Some(StreamingBlob::wrap(body)),
             content_length: Some(content_length_i64),
             content_range,
-            last_modified: Timestamp::parse(TimestampFormat::DateTime, "1985-04-12T23:20:50.520Z")
-                .ok(),
+            last_modified,
             ..Default::default()
         };
         Ok(S3Response::new(output))
@@ -488,28 +507,25 @@ where
             .await
             .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
-        let object_item = if let Some(object) = object_list.objects.into_iter().next() {
+        let object = if let Some(object) = object_list.objects.into_iter().next() {
             object.1
         } else {
             return Err(s3_error!(NoSuchKey));
         };
 
-        let content_length_u64 = match object_item {
-            ObjectListItem::Internal((_, size)) => size,
-            _ => {
-                unimplemented!("external object")
-            }
-        };
-        let content_length_i64 = try_!(i64::try_from(content_length_u64));
+        let content_length_i64 = try_!(i64::try_from(object.size as u64));
 
         // TODO: detect content type
         let content_type = mime::APPLICATION_OCTET_STREAM;
+        let last_modified = object
+            .metadata
+            .get(LAST_MODIFIED_METADATA_KEY)
+            .map(|v| Timestamp::parse(TimestampFormat::EpochSeconds, v.as_str()).unwrap());
 
         let output = HeadObjectOutput {
             content_length: Some(content_length_i64),
             content_type: Some(content_type),
-            last_modified: Timestamp::parse(TimestampFormat::DateTime, "1985-04-12T23:20:50.520Z")
-                .ok(),
+            last_modified,
             metadata: None,
             ..Default::default()
         };
@@ -567,6 +583,7 @@ where
             encoding_type: v2.encoding_type,
             name: v2.name,
             prefix: v2.prefix,
+            common_prefixes: v2.common_prefixes,
             max_keys: v2.max_keys,
             ..Default::default()
         }))
@@ -582,40 +599,49 @@ where
         let address = try_!(Address::from_str(&input.bucket));
         let machine = ObjectStore::attach(address);
 
-        let mut objects: Vec<Object> = Vec::new();
+        let prefix = match &input.prefix {
+            Some(prefix) => prefix.to_string(),
+            None => String::new(),
+        };
 
-        let prefix = input.prefix.clone().unwrap();
+        let delimiter = match &input.delimiter {
+            Some(delimiter) => delimiter.to_string(),
+            None => String::new(),
+        };
+
         let response = machine
             .query(
                 &self.provider,
                 QueryOptions {
                     prefix,
+                    delimiter,
                     ..Default::default()
                 },
             )
             .await
             .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
-        for (key, item) in response.objects {
+        let mut objects: Vec<Object> = Vec::new();
+        for (key, object) in response.objects {
             let key_str = try_!(String::from_utf8(key));
 
-            let object = match item {
-                ObjectListItem::Internal((_, size)) => Object {
-                    key: Some(key_str),
-                    //last_modified: Some(last_modified),
-                    size: Some(try_!(i64::try_from(size))),
-                    ..Default::default()
-                },
-                ObjectListItem::External((_, _)) => {
-                    Object {
-                        key: Some(key_str),
-                        //last_modified: Some(last_modified),
-                        //size: Some(try_!(i64::try_from(size))),
-                        ..Default::default()
-                    }
-                }
-            };
-            objects.push(object);
+            let last_modified = object
+                .metadata
+                .get(LAST_MODIFIED_METADATA_KEY)
+                .map(|v| Timestamp::parse(TimestampFormat::EpochSeconds, v.as_str()).unwrap());
+
+            objects.push(Object {
+                key: Some(key_str),
+                last_modified,
+                size: Some(try_!(i64::try_from(object.size))),
+                ..Default::default()
+            });
+        }
+
+        let mut common_prefixes: CommonPrefixList = Vec::new();
+        for common_prefix in response.common_prefixes {
+            let s = try_!(String::from_utf8(common_prefix));
+            common_prefixes.push(CommonPrefix { prefix: Some(s) });
         }
 
         let key_count = try_!(i32::try_from(objects.len()));
@@ -625,11 +651,13 @@ where
             max_keys: Some(key_count),
             contents: Some(objects),
             delimiter: input.delimiter,
+            common_prefixes: Some(common_prefixes),
             encoding_type: input.encoding_type,
             name: Some(input.bucket),
             prefix: input.prefix,
             ..Default::default()
         };
+
         Ok(S3Response::new(output))
     }
 
@@ -670,19 +698,33 @@ where
             None => unreachable!(),
         };
 
-        let tx = machine
+        let last_modified = try_!(SystemTime::now().duration_since(UNIX_EPOCH)).as_secs();
+        let mut metadata = HashMap::from([(
+            LAST_MODIFIED_METADATA_KEY.to_string(),
+            last_modified.to_string(),
+        )]);
+
+        if input.metadata.is_some() {
+            for (key, value) in input.metadata.unwrap().into_iter() {
+                metadata.insert(key, value);
+            }
+        };
+
+        let _tx = machine
             .add(
                 &self.provider,
                 &mut wallet,
                 &key,
                 file,
-                AddOptions::default(),
+                AddOptions {
+                    metadata,
+                    ..AddOptions::default()
+                },
             )
             .await
             .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let output = PutObjectOutput {
-            //e_tag: Some(e_tag),
             ..Default::default()
         };
 

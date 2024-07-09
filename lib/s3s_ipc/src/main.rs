@@ -97,12 +97,11 @@ async fn run(opt: Opt) -> anyhow::Result<()> {
     opt.network.get().init();
 
     let network = opt.network.get();
-
     // Setup network provider
     let provider =
         JsonRpcProvider::new_http(network.rpc_url()?, None, Some(network.object_api_url()?))?;
 
-    let root = PathBuf::from("/Users/brunocalza/projects/s3-ipc");
+    let root = PathBuf::from("/tmp");
     let basin = match opt.private_key {
         Some(sk) => {
             // Setup local wallet using private key from arg
@@ -113,6 +112,7 @@ async fn run(opt: Opt) -> anyhow::Result<()> {
         }
         None => Basin::new(root, provider, None)?,
     };
+
 
     // Setup S3 service
     let service = {

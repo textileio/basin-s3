@@ -128,20 +128,8 @@ async fn serial() -> MutexGuard<'static, ()> {
     LOCK.lock().await
 }
 
-async fn create_bucket(c: &Client) -> Result<()> {
-    c.create_bucket().bucket("bucket").send().await?;
-
-    debug!("created bucket");
-    Ok(())
-}
-
 async fn delete_object(c: &Client, bucket: &str, key: &str) -> Result<()> {
     c.delete_object().bucket(bucket).key(key).send().await?;
-    Ok(())
-}
-
-async fn delete_bucket(c: &Client, bucket: &str) -> Result<()> {
-    c.delete_bucket().bucket(bucket).send().await?;
     Ok(())
 }
 
