@@ -476,7 +476,14 @@ where
     ) -> S3Result<S3Response<HeadBucketOutput>> {
         let input = req.input;
 
-        let address = try_!(Address::from_str(&input.bucket));
+        let address = match Address::from_str(&input.bucket) {
+            Ok(address) => address,
+            Err(_) => {
+                return Ok(S3Response::new(HeadBucketOutput {
+                    ..Default::default()
+                }))
+            }
+        };
         let _ = machine::info(&self.provider, address, FvmQueryHeight::Committed)
             .await
             .map_err(|_| s3_error!(NoSuchBucket))?;
