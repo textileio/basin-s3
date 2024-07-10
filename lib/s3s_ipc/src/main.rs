@@ -3,7 +3,6 @@
 
 use s3s_basin::BasinWallet;
 use std::io::IsTerminal;
-use std::path::PathBuf;
 use tokio::net::TcpListener;
 
 use adm_provider::json_rpc::JsonRpcProvider;
@@ -15,7 +14,7 @@ use s3s::auth::SimpleAuth;
 use s3s::service::S3ServiceBuilder;
 use s3s_basin::Basin;
 use tracing::info;
-
+use homedir::my_home;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 
@@ -101,7 +100,9 @@ async fn run(opt: Opt) -> anyhow::Result<()> {
     let provider =
         JsonRpcProvider::new_http(network.rpc_url()?, None, Some(network.object_api_url()?))?;
 
-    let root = PathBuf::from("/tmp");
+    let root = my_home()?.unwrap().join(".s3-basin");
+    std::fs::create_dir_all(&root)?;
+
     let basin = match opt.private_key {
         Some(sk) => {
             // Setup local wallet using private key from arg
