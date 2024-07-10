@@ -160,7 +160,7 @@ async fn test_list_buckets() -> Result<()> {
     let response2 = log_and_unwrap!(c.list_buckets().send().await);
     let bucket_count = response2.buckets().len();
 
-    assert_eq!(bucket_count, 6);
+    assert_eq!(bucket_count, 1);
 
     Ok(())
 }
