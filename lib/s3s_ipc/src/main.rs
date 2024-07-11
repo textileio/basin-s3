@@ -22,7 +22,7 @@ use hyper_util::server::conn::auto::Builder as ConnBuilder;
 #[command(version)]
 struct Opt {
     /// Host name to listen on.
-    #[arg(long, default_value = "localhost")]
+    #[arg(long, default_value = "127.0.0.1")]
     host: String,
 
     /// Port number to listen on.
