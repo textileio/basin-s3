@@ -763,7 +763,7 @@ where
         let file_path = self.get_upload_part_path(&upload_id, part_number);
         let mut md5_hash = <Md5 as Digest>::new();
         let stream = body.inspect_ok(|bytes| md5_hash.update(bytes.as_ref()));
-        let mut file = try_!(fs::File::create_new(&file_path).await);
+        let mut file = try_!(fs::File::create(&file_path).await);
         let size = copy_bytes(stream, &mut file).await?;
         try_!(file.flush().await);
 
