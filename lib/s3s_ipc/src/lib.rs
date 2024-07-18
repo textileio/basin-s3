@@ -13,7 +13,6 @@ clippy::multiple_crate_versions, // TODO: check later
 )]
 
 pub use self::basin::Basin;
-pub use self::basin::BasinWallet;
 pub use self::error::*;
 
 #[macro_use]

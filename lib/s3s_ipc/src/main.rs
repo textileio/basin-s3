@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::all, clippy::pedantic)]
 
-use s3s_basin::BasinWallet;
 use std::io::IsTerminal;
 use tokio::net::TcpListener;
 
@@ -10,13 +9,13 @@ use adm_sdk::network::Network as SdkNetwork;
 use adm_signer::{key::parse_secret_key, AccountKind, Wallet};
 use clap::{CommandFactory, Parser, ValueEnum};
 use fendermint_crypto::SecretKey;
-use s3s::auth::SimpleAuth;
-use s3s::service::S3ServiceBuilder;
-use s3s_basin::Basin;
-use tracing::info;
 use homedir::my_home;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use s3s::auth::SimpleAuth;
+use s3s::service::S3ServiceBuilder;
+use basin_s3::Basin;
+use tracing::info;
 
 #[derive(Debug, Parser)]
 #[command(version)]
@@ -109,11 +108,10 @@ async fn run(opt: Opt) -> anyhow::Result<()> {
             let mut wallet =
                 Wallet::new_secp256k1(sk, AccountKind::Ethereum, network.subnet_id()?)?;
             wallet.init_sequence(&provider).await?;
-            Basin::new(root, provider, Some(BasinWallet::new(wallet)))?
+            Basin::new(root, provider, Some(wallet))?
         }
         None => Basin::new(root, provider, None)?,
     };
-
 
     // Setup S3 service
     let service = {
@@ -149,7 +147,7 @@ async fn run(opt: Opt) -> anyhow::Result<()> {
 
     loop {
         let (socket, _) = tokio::select! {
-            res =  listener.accept() => {
+            res = listener.accept() => {
                 match res {
                     Ok(conn) => conn,
                     Err(err) => {

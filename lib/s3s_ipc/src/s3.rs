@@ -22,6 +22,7 @@ use adm_provider::message::GasParams;
 use adm_sdk::machine::objectstore::GetOptions;
 use adm_sdk::machine::objectstore::ObjectStore;
 use adm_sdk::machine::Machine;
+use adm_signer::Signer;
 use fendermint_actor_machine::WriteAccess;
 use fvm_shared::address::Address;
 use md5::Digest;
@@ -42,9 +43,10 @@ use crate::Basin;
 static LAST_MODIFIED_METADATA_KEY: &str = "last_modified";
 
 #[async_trait::async_trait]
-impl<C> S3 for Basin<C>
+impl<C, S> S3 for Basin<C, S>
 where
     C: Client + Send + Sync + 'static,
+    S: Signer + 'static,
 {
     // #[tracing::instrument]
     async fn abort_multipart_upload(
@@ -209,7 +211,7 @@ where
         try_!(file.rewind().await);
 
         let mut wallet = match &self.wallet {
-            Some(w) => w.clone(),
+            Some(w) => w.to_owned(),
             None => unreachable!(),
         };
 
@@ -712,7 +714,7 @@ where
         )]);
 
         if input.metadata.is_some() {
-            for (key, value) in input.metadata.unwrap().into_iter() {
+            for (key, value) in input.metadata.unwrap() {
                 metadata.insert(key, value);
             }
         };

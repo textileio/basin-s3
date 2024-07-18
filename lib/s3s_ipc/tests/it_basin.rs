@@ -12,8 +12,7 @@ use adm_signer::AccountKind;
 use adm_signer::Wallet;
 use s3s::auth::SimpleAuth;
 use s3s::service::S3ServiceBuilder;
-use s3s_basin::Basin;
-use s3s_basin::BasinWallet;
+use basin_s3::Basin;
 use tempfile::tempdir;
 use tokio::sync::OnceCell;
 
@@ -94,7 +93,7 @@ async fn config() -> &'static SdkConfig {
         let basin = Basin::new(
             tempdir().unwrap().into_path(),
             provider,
-            Some(BasinWallet::new(WALLET.get().unwrap().clone())),
+            Some(WALLET.get().unwrap().clone()),
         )
         .unwrap();
 
