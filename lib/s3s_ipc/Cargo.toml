@@ -2,43 +2,39 @@
 authors = { workspace = true }
 description = { workspace = true }
 edition = { workspace = true }
-name = "s3s_ipc"
+name = "basin_s3"
 homepage = { workspace = true }
 license = { workspace = true }
 readme = { workspace = true }
 repository = { workspace = true }
 version = { workspace = true }
+categories = ["database"]
+keywords = ["s3", "basin"]
 
 [[bin]]
-name = "s3s_ipc"
+name = "basin_s3"
 required-features = ["binary"]
 
 [features]
 default = []
-binary = ["tokio/full", "dep:clap", "dep:tracing-subscriber", "dep:hyper"]
+binary = ["tokio/full", "dep:clap", "dep:tracing-subscriber", "dep:hyper-util"]
 
 [dependencies]
 async-trait = "0.1.73"
-base64-simd = "0.8.0"
 bytes = "1.4.0"
-chrono = { version = "0.4.26", default-features = false, features = ["std", "clock"] }
 clap = { version = "4.3.21", optional = true, features = ["derive"] }
-crc32c = "0.6.5"
-crc32fast = "1.3.2"
-digest = "0.10.7"
 futures = "0.3.28"
 hex-simd = "0.8.0"
-hyper = { version = "0.14.27", optional = true, features = ["http1", "http2", "server", "stream", "runtime"] }
+hyper-util = { version = "0.1.5", optional = true, features = [
+    "server-auto",
+    "server-graceful",
+    "http1",
+    "http2",
+    "tokio",
+] }
 md-5 = "0.10.5"
 mime = "0.3.17"
-nugine-rust-utils = "0.3.1"
-numeric_cast = "0.2.1"
-path-absolutize = "3.1.0"
-s3s = "0.8.1"
-serde_json = "1.0.104"
-sha1 = "0.10.5"
-sha2 = "0.10.7"
-thiserror = "1.0.45"
+s3s = "0.10.0"
 time = "0.3.25"
 tokio = { version = "1.31.0", features = ["fs", "io-util"] }
 tokio-util = { version = "0.7.8", features = ["io"] }
@@ -49,40 +45,30 @@ transform-stream = "0.3.0"
 uuid = { version = "1.4.1", features = ["v4"] }
 
 anyhow = "1.0.80"
-base64 = "0.21"
-serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
-cid = { version = "0.10.1", default-features = false, features = [
-    "serde-codec",
-    "std",
-] }
-num-traits = "0.2"
 
-fvm_shared = { version = "4.1.0" }
-fvm_ipld_encoding = "0.4.0"
-
-fendermint_crypto = { path = "../../../ipc/fendermint/crypto" }
-fendermint_vm_core = { path = "../../../ipc/fendermint/vm/core" }
-fendermint_vm_encoding = { path = "../../../ipc/fendermint/vm/encoding" }
-fendermint_vm_genesis = { path = "../../../ipc/fendermint/vm/genesis" }
-fendermint_vm_actor_interface = { path = "../../../ipc/fendermint/vm/actor_interface" }
-fendermint_rpc = { path = "../../../ipc/fendermint/rpc" }
-fendermint_vm_message = { path = "../../../ipc/fendermint/vm/message" }
-fendermint_actor_objectstore = { path = "../../../ipc/fendermint/actors/objectstore" }
-
-tendermint = { version = "0.31", features = ["secp256k1"] }
-tendermint-rpc = { version = "0.31", features = [
+fvm_shared = "4.1.0"
+adm_sdk = { git = "https://github.com/textileio/basin.git",  rev = "9d790ef961731f2331eda0d45d5494d73e85c0ad"}
+adm_provider = { git = "https://github.com/textileio/basin.git",  rev = "9d790ef961731f2331eda0d45d5494d73e85c0ad"}
+adm_signer = { git = "https://github.com/textileio/basin.git",  rev = "9d790ef961731f2331eda0d45d5494d73e85c0ad"}
+fendermint_vm_message = { git = "https://github.com/textileio/ipc.git", rev = "89c3871b8ba7eaf30e05ef0f29b6e3fb5c5789d7" }
+fendermint_actor_machine = { git = "https://github.com/textileio/ipc.git", rev = "89c3871b8ba7eaf30e05ef0f29b6e3fb5c5789d7" }
+fendermint_crypto = { git = "https://github.com/textileio/ipc.git", rev = "89c3871b8ba7eaf30e05ef0f29b6e3fb5c5789d7" }
+tendermint-rpc = { version = "0.31.1", features = [
     "secp256k1",
     "http-client",
     "websocket-client",
 ] }
+bytestring = "1.3.1"
+async-tempfile = "0.5.0"
+tempfile = "3.10.1"
+homedir = "0.3.3"
 
 [dev-dependencies]
 anyhow = { version = "1.0.73", features = ["backtrace"] }
-aws-config = { version = "0.56.1", default-features = false }
-aws-credential-types = { version = "0.56.1", features = ["test-util"] }
-aws-sdk-s3 = "0.34.0"
+aws-config = { version = "1.1.2", default-features = false }
+aws-credential-types = { version = "1.1.2", features = ["test-util"] }
+aws-sdk-s3 = { version = "1.12.0", features = ["behavior-version-latest"] }
 once_cell = "1.18.0"
-s3s-aws = "0.8.1"
+s3s-aws = "0.10.0"
 tokio = { version = "1.31.0", features = ["full"] }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter", "time"] }

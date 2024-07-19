@@ -10,7 +10,7 @@ pub struct Error {
     source: StdError,
 }
 
-pub type Result<T = (), E = Error> = std::result::Result<T, E>;
+pub type Result<T = (), E = Error> = anyhow::Result<T, E>;
 
 impl Error {
     #[must_use]
