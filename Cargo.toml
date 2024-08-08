@@ -1,5 +1,5 @@
 [workspace]
-members = ["lib/s3s_ipc"]
+members = ["lib/basin_s3"]
 resolver = "2"
 
 [workspace.package]

@@ -1,13 +1,15 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use adm_provider::json_rpc::JsonRpcProvider;
 use adm_signer::Signer;
 use s3s::dto::PartNumber;
-use std::path::PathBuf;
 use tendermint_rpc::Client;
 use uuid::Uuid;
 
 pub struct Basin<C: Client + Send + Sync, S: Signer> {
     pub root: PathBuf,
-    pub provider: JsonRpcProvider<C>,
+    pub provider: Arc<JsonRpcProvider<C>>,
     pub wallet: Option<S>,
     pub is_read_only: bool,
 }
@@ -25,9 +27,9 @@ where
         let is_read_only = wallet.is_none();
         Ok(Self {
             root,
-            provider,
             wallet,
             is_read_only,
+            provider: Arc::new(provider),
         })
     }
 

@@ -2,78 +2,86 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 use std::io::IsTerminal;
-use tokio::net::TcpListener;
 
 use adm_provider::json_rpc::JsonRpcProvider;
 use adm_sdk::network::Network as SdkNetwork;
 use adm_signer::{key::parse_secret_key, AccountKind, Wallet};
+use basin_s3::Basin;
 use clap::{CommandFactory, Parser, ValueEnum};
+use clap_verbosity_flag::Verbosity;
 use fendermint_crypto::SecretKey;
 use homedir::my_home;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use s3s::auth::SimpleAuth;
 use s3s::service::S3ServiceBuilder;
-use basin_s3::Basin;
+use tokio::net::TcpListener;
 use tracing::info;
 
 #[derive(Debug, Parser)]
 #[command(version)]
-struct Opt {
+struct Cli {
+    #[command(flatten)]
+    verbose: Verbosity,
+
     /// Host name to listen on.
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, env, default_value = "127.0.0.1")]
     host: String,
 
     /// Port number to listen on.
-    #[arg(long, default_value = "8014")] // The original design was finished on 2020-08-14.
+    #[arg(long, env, default_value = "8014")]
     port: u16,
 
     /// Network presets for subnet and RPC URLs.
-    #[arg(short, long, value_enum, default_value_t = Network::Testnet)]
+    #[arg(short, long, env, value_enum, default_value_t = Network::Testnet)]
     network: Network,
 
     /// Wallet private key (ECDSA, secp256k1) for signing transactions.
-    #[arg(short, long, value_parser = parse_secret_key)]
+    #[arg(short, long, env, value_parser = parse_secret_key)]
     private_key: Option<SecretKey>,
 
     /// Access key used for authentication.
-    #[arg(long)]
+    #[arg(long, env)]
     access_key: Option<String>,
 
     /// Secret key used for authentication.
-    #[arg(long)]
+    #[arg(long, env)]
     secret_key: Option<String>,
 
     /// Domain name used for virtual-hosted-style requests.
-    #[arg(long)]
+    #[arg(long, env)]
     domain_name: Option<String>,
 }
 
-fn setup_tracing() {
+fn setup_tracing(cli: &Cli) {
     use tracing_subscriber::EnvFilter;
 
-    let env_filter = EnvFilter::from_default_env();
+    let log_level = match cli.verbose.log_level() {
+        Some(level) => level.to_string(),
+        None => "info".to_string(),
+    };
+
     let enable_color = std::io::stdout().is_terminal();
 
     tracing_subscriber::fmt()
         .pretty()
-        .with_env_filter(env_filter)
+        .with_env_filter(EnvFilter::new(log_level))
         .with_ansi(enable_color)
         .init();
 }
 
-fn check_cli_args(opt: &Opt) {
+fn check_cli_args(cli: &Cli) {
     use clap::error::ErrorKind;
 
-    let mut cmd = Opt::command();
+    let mut cmd = Cli::command();
 
     // TODO: how to specify the requirements with clap derive API?
-    if let (Some(_), None) | (None, Some(_)) = (&opt.access_key, &opt.secret_key) {
+    if let (Some(_), None) | (None, Some(_)) = (&cli.access_key, &cli.secret_key) {
         let msg = "access key and secret key must be specified together";
         cmd.error(ErrorKind::MissingRequiredArgument, msg).exit();
     }
 
-    if let Some(ref s) = opt.domain_name {
+    if let Some(ref s) = cli.domain_name {
         if s.contains('/') {
             let msg = format!("expected domain name, found URL-like string: {s:?}");
             cmd.error(ErrorKind::InvalidValue, msg).exit();
@@ -82,19 +90,17 @@ fn check_cli_args(opt: &Opt) {
 }
 
 fn main() -> anyhow::Result<()> {
-    let opt = Opt::parse();
-    check_cli_args(&opt);
-
-    setup_tracing();
-
-    run(opt)
+    let cli = Cli::parse();
+    check_cli_args(&cli);
+    setup_tracing(&cli);
+    run(cli)
 }
 
 #[tokio::main]
-async fn run(opt: Opt) -> anyhow::Result<()> {
-    opt.network.get().init();
+async fn run(cli: Cli) -> anyhow::Result<()> {
+    cli.network.get().init();
 
-    let network = opt.network.get();
+    let network = cli.network.get();
     // Setup network provider
     let provider =
         JsonRpcProvider::new_http(network.rpc_url()?, None, Some(network.object_api_url()?))?;
@@ -102,7 +108,7 @@ async fn run(opt: Opt) -> anyhow::Result<()> {
     let root = my_home()?.unwrap().join(".s3-basin");
     std::fs::create_dir_all(&root)?;
 
-    let basin = match opt.private_key {
+    let basin = match cli.private_key {
         Some(sk) => {
             // Setup local wallet using private key from arg
             let mut wallet =
@@ -118,13 +124,13 @@ async fn run(opt: Opt) -> anyhow::Result<()> {
         let mut b = S3ServiceBuilder::new(basin);
 
         // Enable authentication
-        if let (Some(ak), Some(sk)) = (opt.access_key, opt.secret_key) {
+        if let (Some(ak), Some(sk)) = (cli.access_key, cli.secret_key) {
             b.set_auth(SimpleAuth::from_single(ak, sk));
             info!("authentication is enabled");
         }
 
         // Enable parsing virtual-hosted-style requests
-        if let Some(domain_name) = opt.domain_name {
+        if let Some(domain_name) = cli.domain_name {
             b.set_base_domain(domain_name);
             info!("virtual-hosted-style requests are enabled");
         }
@@ -133,7 +139,7 @@ async fn run(opt: Opt) -> anyhow::Result<()> {
     };
 
     // Run server
-    let listener = TcpListener::bind((opt.host.as_str(), opt.port)).await?;
+    let listener = TcpListener::bind((cli.host.as_str(), cli.port)).await?;
     let local_addr = listener.local_addr()?;
 
     let hyper_service = service.into_shared();

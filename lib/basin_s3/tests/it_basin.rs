@@ -10,9 +10,9 @@ use adm_sdk::network::Network;
 use adm_signer::key::parse_secret_key;
 use adm_signer::AccountKind;
 use adm_signer::Wallet;
+use basin_s3::Basin;
 use s3s::auth::SimpleAuth;
 use s3s::service::S3ServiceBuilder;
-use basin_s3::Basin;
 use tempfile::tempdir;
 use tokio::sync::OnceCell;
 
@@ -25,9 +25,11 @@ use aws_sdk_s3::config::Region;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 
+use aws_sdk_s3::types::BucketLocationConstraint;
 use aws_sdk_s3::types::ChecksumMode;
 use aws_sdk_s3::types::CompletedMultipartUpload;
 use aws_sdk_s3::types::CompletedPart;
+use aws_sdk_s3::types::CreateBucketConfiguration;
 
 use anyhow::Result;
 use once_cell::sync::Lazy;
@@ -40,10 +42,6 @@ const DOMAIN_NAME: &str = "localhost:8014";
 fn setup_tracing() {
     use tracing_subscriber::EnvFilter;
 
-    if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "it_aws=debug,s3s_fs=debug,s3s=debug");
-    }
-
     tracing_subscriber::fmt()
         .pretty()
         .with_env_filter(EnvFilter::from_default_env())
@@ -54,7 +52,7 @@ fn setup_tracing() {
 async fn get_wallet() -> Wallet {
     let sk = parse_secret_key(env::var("PRIVATE_KEY").unwrap().as_str()).unwrap();
 
-    let network = Network::Testnet;
+    let network = Network::Localnet;
     network.init();
     let provider = JsonRpcProvider::new_http(
         network.rpc_url().unwrap(),
@@ -80,7 +78,7 @@ async fn config() -> &'static SdkConfig {
         let cred = Credentials::for_tests();
 
         // Setup S3 provider
-        let network = Network::Testnet;
+        let network = Network::Localnet;
         network.init();
         // Setup network provider
         let provider = JsonRpcProvider::new_http(
@@ -127,7 +125,34 @@ async fn serial() -> MutexGuard<'static, ()> {
     LOCK.lock().await
 }
 
-async fn delete_object(c: &Client, bucket: &str, key: &str) -> Result<()> {
+async fn create_bucket(c: &Client) -> Result<String> {
+    let location = BucketLocationConstraint::UsWest2;
+    let cfg = CreateBucketConfiguration::builder()
+        .location_constraint(location)
+        .build();
+
+    c.create_bucket()
+        .create_bucket_configuration(cfg)
+        .bucket("foo")
+        .send()
+        .await?;
+
+    let list_buckets_output = c.list_buckets().send().await?;
+
+    let bucket_name = list_buckets_output
+        .buckets
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone()
+        .name
+        .unwrap();
+
+    debug!("created bucket: {bucket_name:?}");
+    Ok(bucket_name)
+}
+
+async fn delete_object(c: &Client, bucket: &String, key: &str) -> Result<()> {
     c.delete_object().bucket(bucket).key(key).send().await?;
     Ok(())
 }
@@ -154,12 +179,17 @@ async fn test_list_buckets() -> Result<()> {
     let response1 = log_and_unwrap!(c.list_buckets().send().await);
     drop(response1);
 
-    //create_bucket(&c).await?;
+    let bucket1_str = create_bucket(&c).await?;
+    let bucket2_str = create_bucket(&c).await?;
 
     let response2 = log_and_unwrap!(c.list_buckets().send().await);
-    let bucket_count = response2.buckets().len();
-
-    assert_eq!(bucket_count, 1);
+    let bucket_names: Vec<_> = response2
+        .buckets()
+        .iter()
+        .filter_map(|bucket| bucket.name())
+        .collect();
+    assert!(bucket_names.contains(&bucket1_str.as_str()));
+    assert!(bucket_names.contains(&bucket2_str.as_str()));
 
     Ok(())
 }
@@ -168,24 +198,21 @@ async fn test_list_buckets() -> Result<()> {
 #[tracing::instrument]
 async fn test_list_objects_v2() -> Result<()> {
     let c = Client::new(config().await);
-    let bucket = "t2kk6h4zq3ecnjcufbfzif7htuodbti4kq3p5wtxa".to_string();
-    let bucket_str = bucket.as_str();
-    // create_bucket(&c).await?;
+    let bucket_str = create_bucket(&c).await?;
 
     let test_prefix = "this/is/a/test/path/";
     let key1 = "this/is/a/test/path/file1.txt";
     let key2 = "this/is/a/test/path/file2.txt";
     {
         let content = "hello world\nनमस्ते दुनिया\n";
-
         c.put_object()
-            .bucket(bucket_str)
+            .bucket(&bucket_str)
             .key(key1)
             .body(ByteStream::from_static(content.as_bytes()))
             .send()
             .await?;
         c.put_object()
-            .bucket(bucket_str)
+            .bucket(&bucket_str)
             .key(key2)
             .body(ByteStream::from_static(content.as_bytes()))
             .send()
@@ -219,22 +246,17 @@ async fn test_single_object() -> Result<()> {
     let _guard = serial().await;
 
     let c = Client::new(config().await);
-    let bucket = "t2kk6h4zq3ecnjcufbfzif7htuodbti4kq3p5wtxa".to_string();
-    let bucket = bucket.as_str();
-    let key = "sample-test.txt";
+    let key = "sample.txt";
     let content = "hello world\n你好世界\n";
-    // let crc32c =
-    //     base64_simd::STANDARD.encode_to_string(crc32c::crc32c(content.as_bytes()).to_be_bytes());
 
-    //create_bucket(&c).await?;
+    let bucket = create_bucket(&c).await?;
 
     {
         let body = ByteStream::from_static(content.as_bytes());
         c.put_object()
-            .bucket(bucket)
+            .bucket(&bucket)
             .key(key)
             .body(body)
-            //.checksum_crc32_c(crc32c.as_str())
             .send()
             .await?;
     }
@@ -242,23 +264,21 @@ async fn test_single_object() -> Result<()> {
     {
         let ans = c
             .get_object()
-            .bucket(bucket)
+            .bucket(&bucket)
             .key(key)
             .checksum_mode(ChecksumMode::Enabled)
             .send()
             .await?;
 
         let content_length: usize = ans.content_length().unwrap().try_into().unwrap();
-        //let checksum_crc32c = ans.checksum_crc32_c.unwrap();
         let body = ans.body.collect().await?.into_bytes();
 
         assert_eq!(content_length, content.len());
-        //assert_eq!(checksum_crc32c, crc32c);
         assert_eq!(body.as_ref(), content.as_bytes());
     }
 
     {
-        delete_object(&c, bucket, key).await?;
+        delete_object(&c, &bucket, key).await?;
         //delete_bucket(&c, bucket).await?;
     }
 
@@ -272,9 +292,7 @@ async fn test_multipart() -> Result<()> {
 
     let c = Client::new(config().await);
 
-    let bucket = "t2kk6h4zq3ecnjcufbfzif7htuodbti4kq3p5wtxa".to_string();
-    let bucket = bucket.as_str();
-    //create_bucket(&c).await?;
+    let bucket = create_bucket(&c).await?;
 
     let key = "sample-test.txt";
     let content = "abcdefghijklmnopqrstuvwxyz/0123456789/!@#$%^&*();\n";
@@ -282,7 +300,7 @@ async fn test_multipart() -> Result<()> {
     let upload_id = {
         let ans = c
             .create_multipart_upload()
-            .bucket(bucket)
+            .bucket(&bucket)
             .key(key)
             .send()
             .await?;
@@ -296,7 +314,7 @@ async fn test_multipart() -> Result<()> {
 
         let ans = c
             .upload_part()
-            .bucket(bucket)
+            .bucket(&bucket)
             .key(key)
             .upload_id(upload_id)
             .body(body)
@@ -319,7 +337,7 @@ async fn test_multipart() -> Result<()> {
 
         let _ = c
             .complete_multipart_upload()
-            .bucket(bucket)
+            .bucket(&bucket)
             .key(key)
             .multipart_upload(upload)
             .upload_id(upload_id)
@@ -328,7 +346,7 @@ async fn test_multipart() -> Result<()> {
     }
 
     {
-        let ans = c.get_object().bucket(bucket).key(key).send().await?;
+        let ans = c.get_object().bucket(&bucket).key(key).send().await?;
 
         let content_length: usize = ans.content_length().unwrap().try_into().unwrap();
         let body = ans.body.collect().await?.into_bytes();
@@ -338,7 +356,7 @@ async fn test_multipart() -> Result<()> {
     }
 
     {
-        delete_object(&c, bucket, key).await?;
+        delete_object(&c, &bucket, key).await?;
         //delete_bucket(&c, bucket).await?;
     }
 
