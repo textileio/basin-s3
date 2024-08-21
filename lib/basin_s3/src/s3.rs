@@ -1,46 +1,48 @@
-use adm_sdk::machine;
-use adm_sdk::machine::objectstore::AddOptions;
-use adm_sdk::machine::objectstore::DeleteOptions;
-use adm_sdk::machine::objectstore::QueryOptions;
-use async_tempfile::TempFile;
-use bytestring::ByteString;
-use fendermint_vm_message::query::FvmQueryHeight;
-use futures::StreamExt;
-use futures::TryStreamExt;
-use md5::Md5;
-use s3s::S3Error;
-use s3s::S3ErrorCode;
 use std::collections::HashMap;
-use std::ops::Not;
-use tendermint_rpc::Client;
-use tokio::fs;
-use tokio::io::AsyncSeekExt;
-use tokio::io::AsyncWriteExt;
-use tracing::debug;
-
-use adm_provider::message::GasParams;
-use adm_sdk::machine::objectstore::GetOptions;
-use adm_sdk::machine::objectstore::ObjectStore;
-use adm_sdk::machine::Machine;
-use adm_signer::Signer;
-use fendermint_actor_machine::WriteAccess;
-use fvm_shared::address::Address;
-use md5::Digest;
-use s3s::dto::*;
-use s3s::s3_error;
-use s3s::S3Result;
-use s3s::S3;
-use s3s::{S3Request, S3Response};
+use std::ops::{Deref, Not};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
-use crate::utils::bytes_stream;
 use crate::utils::copy_bytes;
 use crate::utils::hex;
 use crate::Basin;
 
+use adm_provider::message::GasParams;
+use adm_sdk::machine;
+use adm_sdk::machine::objectstore::AddOptions;
+use adm_sdk::machine::objectstore::DeleteOptions;
+use adm_sdk::machine::objectstore::GetOptions;
+use adm_sdk::machine::objectstore::ObjectStore;
+use adm_sdk::machine::objectstore::QueryOptions;
+use adm_sdk::machine::Machine;
+use adm_signer::Signer;
+use async_tempfile::TempFile;
+use bytestring::ByteString;
+use fendermint_actor_machine::WriteAccess;
+use fendermint_vm_message::query::FvmQueryHeight;
+use futures::StreamExt;
+use futures::TryStreamExt;
+use fvm_shared::address::Address;
+use md5::Digest;
+use md5::Md5;
+use s3s::dto::*;
+use s3s::s3_error;
+use s3s::S3Error;
+use s3s::S3ErrorCode;
+use s3s::S3Result;
+use s3s::S3;
+use s3s::{S3Request, S3Response};
+use tendermint_rpc::Client;
+use tokio::fs;
+use tokio::io::AsyncSeekExt;
+use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
+use tracing::debug;
+use tracing::log::error;
+use uuid::Uuid;
+
 static LAST_MODIFIED_METADATA_KEY: &str = "last_modified";
+static CREATION_DATE_METADATA_KEY: &str = "creation_date";
 
 #[async_trait::async_trait]
 impl<C, S> S3 for Basin<C, S>
@@ -138,12 +140,14 @@ where
         };
 
         let address = try_!(Address::from_str(bucket.as_str()));
-        let machine = ObjectStore::attach(address);
+        let machine = ObjectStore::attach(address)
+            .await
+            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let last_modified = try_!(SystemTime::now().duration_since(UNIX_EPOCH)).as_secs();
         let _ = machine
-            .add(
-                &self.provider,
+            .add_reader(
+                self.provider.deref(),
                 &mut wallet,
                 &key,
                 file,
@@ -185,24 +189,29 @@ where
 
         // Download object to a file
         let address = try_!(Address::from_str(&src_bucket));
-        let machine = ObjectStore::attach(address);
+        let machine = ObjectStore::attach(address)
+            .await
+            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let mut file = try_!(TempFile::new().await);
         let (writer, mut reader) = tokio::io::duplex(4096);
 
-        let () = machine
-            .get(
-                &self.provider,
-                src_key.as_str(),
-                writer,
-                GetOptions {
-                    range: None,
-                    height: FvmQueryHeight::Committed,
-                    show_progress: false,
-                },
-            )
-            .await
-            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
+        let provider = self.provider.clone();
+        tokio::spawn(async move {
+            let _ = machine
+                .get(
+                    provider.deref(),
+                    src_key.as_str(),
+                    writer,
+                    GetOptions {
+                        range: None,
+                        height: FvmQueryHeight::Committed,
+                        show_progress: false,
+                    },
+                )
+                .await
+                .map_err(|err| error!("failed to download object: {}", err));
+        });
 
         try_!(tokio::io::copy(&mut reader, &mut file).await);
 
@@ -216,12 +225,14 @@ where
         };
 
         let address = try_!(Address::from_str(&dst_bucket));
-        let machine = ObjectStore::attach(address);
+        let machine = ObjectStore::attach(address)
+            .await
+            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let last_modified = try_!(SystemTime::now().duration_since(UNIX_EPOCH)).as_secs();
         let _ = machine
-            .add(
-                &self.provider,
+            .add_reader(
+                self.provider.deref(),
                 &mut wallet,
                 &dst_key,
                 file,
@@ -265,14 +276,20 @@ where
             ));
         }
 
+        let creation_date = try_!(SystemTime::now().duration_since(UNIX_EPOCH)).as_secs();
+
         let mut wallet = match &self.wallet {
             Some(w) => w.clone(),
             None => unreachable!(),
         };
         let (machine, _) = ObjectStore::new(
-            &self.provider,
+            self.provider.deref(),
             &mut wallet,
             WriteAccess::OnlyOwner,
+            HashMap::from([(
+                CREATION_DATE_METADATA_KEY.to_string(),
+                creation_date.to_string(),
+            )]),
             GasParams::default(),
         )
         .await
@@ -326,7 +343,9 @@ where
         let key = req.input.key;
 
         let address = try_!(Address::from_str(&bucket));
-        let machine = ObjectStore::attach(address);
+        let machine = ObjectStore::attach(address)
+            .await
+            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let mut wallet = match &self.wallet {
             Some(w) => w.clone(),
@@ -334,7 +353,7 @@ where
         };
         let tx = machine
             .delete(
-                &self.provider,
+                self.provider.deref(),
                 &mut wallet,
                 key.as_str(),
                 DeleteOptions::default(),
@@ -361,7 +380,9 @@ where
         }
 
         let address = try_!(Address::from_str(&req.input.bucket));
-        let machine = ObjectStore::attach(address);
+        let machine = ObjectStore::attach(address)
+            .await
+            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let mut wallet = match &self.wallet {
             Some(w) => w.clone(),
@@ -370,7 +391,7 @@ where
         for object in req.input.delete.objects {
             let tx = machine
                 .delete(
-                    &self.provider,
+                    self.provider.deref(),
                     &mut wallet,
                     object.key.as_str(),
                     DeleteOptions::default(),
@@ -393,11 +414,13 @@ where
         let input = req.input;
 
         let address = try_!(Address::from_str(&input.bucket));
-        let machine = ObjectStore::attach(address);
+        let machine = ObjectStore::attach(address)
+            .await
+            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let object_list = machine
             .query(
-                &self.provider,
+                self.provider.deref(),
                 QueryOptions {
                     prefix: input.key.clone(),
                     ..Default::default()
@@ -424,7 +447,7 @@ where
                 (content_length, Some(content_range))
             }
         };
-        let content_length_usize = try_!(usize::try_from(content_length));
+
         let content_length_i64 = try_!(i64::try_from(content_length));
 
         let range = match input.range {
@@ -438,23 +461,24 @@ where
         };
 
         let (writer, reader) = tokio::io::duplex(4096);
-        let reader_stream = tokio_util::io::ReaderStream::new(reader);
+        let reader_stream = ReaderStream::new(reader);
 
-        let body = bytes_stream(reader_stream, content_length_usize);
-
-        let () = machine
-            .get(
-                &self.provider,
-                input.key.as_str(),
-                writer,
-                GetOptions {
-                    range,
-                    height: FvmQueryHeight::Committed,
-                    show_progress: false,
-                },
-            )
-            .await
-            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
+        let provider = self.provider.clone();
+        tokio::spawn(async move {
+            let _ = machine
+                .get(
+                    provider.deref(),
+                    input.key.as_str(),
+                    writer,
+                    GetOptions {
+                        range,
+                        height: FvmQueryHeight::Committed,
+                        show_progress: false,
+                    },
+                )
+                .await
+                .map_err(|err| error!("failed to download object: {}", err));
+        });
 
         let last_modified = object
             .metadata
@@ -462,7 +486,7 @@ where
             .map(|v| Timestamp::parse(TimestampFormat::EpochSeconds, v.as_str()).unwrap());
 
         let output = GetObjectOutput {
-            body: Some(StreamingBlob::wrap(body)),
+            body: Some(StreamingBlob::wrap(reader_stream)),
             content_length: Some(content_length_i64),
             content_range,
             last_modified,
@@ -478,15 +502,12 @@ where
     ) -> S3Result<S3Response<HeadBucketOutput>> {
         let input = req.input;
 
-        let address = match Address::from_str(&input.bucket) {
-            Ok(address) => address,
-            Err(_) => {
-                return Ok(S3Response::new(HeadBucketOutput {
-                    ..Default::default()
-                }))
-            }
+        let Ok(address) = Address::from_str(&input.bucket) else {
+            return Ok(S3Response::new(HeadBucketOutput {
+                ..Default::default()
+            }));
         };
-        let _ = machine::info(&self.provider, address, FvmQueryHeight::Committed)
+        let _ = machine::info(self.provider.deref(), address, FvmQueryHeight::Committed)
             .await
             .map_err(|_| s3_error!(NoSuchBucket))?;
 
@@ -503,11 +524,13 @@ where
         let input = req.input;
 
         let address = try_!(Address::from_str(&input.bucket));
-        let machine = ObjectStore::attach(address);
+        let machine = ObjectStore::attach(address)
+            .await
+            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let object_list = machine
             .query(
-                &self.provider,
+                self.provider.deref(),
                 QueryOptions {
                     prefix: input.key.clone(),
                     ..Default::default()
@@ -557,17 +580,23 @@ where
             Some(w) => w.clone(),
             None => unreachable!(),
         };
-        let list = ObjectStore::list(&self.provider, &wallet, FvmQueryHeight::Committed)
+        let list = ObjectStore::list(self.provider.deref(), &wallet, FvmQueryHeight::Committed)
             .await
             .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let mut buckets: Vec<Bucket> = Vec::new();
 
         for data in list {
+            let creation_date = data
+                .metadata
+                .get(CREATION_DATE_METADATA_KEY)
+                .map(|v| Timestamp::parse(TimestampFormat::EpochSeconds, v.as_str()).unwrap());
+
+            let bucket_name = data.address.to_string();
+
             let bucket = Bucket {
-                //creation_date: Some(created_or_modified_date),
-                creation_date: None,
-                name: Some(data.address.to_string()),
+                creation_date,
+                name: Some(bucket_name),
             };
             buckets.push(bucket);
         }
@@ -606,7 +635,9 @@ where
         let input: ListObjectsV2Input = req.input;
 
         let address = try_!(Address::from_str(&input.bucket));
-        let machine = ObjectStore::attach(address);
+        let machine = ObjectStore::attach(address)
+            .await
+            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let prefix = match &input.prefix {
             Some(prefix) => prefix.to_string(),
@@ -620,7 +651,7 @@ where
 
         let response = machine
             .query(
-                &self.provider,
+                self.provider.deref(),
                 QueryOptions {
                     prefix,
                     delimiter,
@@ -692,7 +723,9 @@ where
         };
 
         let address = try_!(Address::from_str(bucket.as_str()));
-        let machine = ObjectStore::attach(address);
+        let machine = ObjectStore::attach(address)
+            .await
+            .map_err(|e| S3Error::new(S3ErrorCode::Custom(ByteString::from(e.to_string()))))?;
 
         let mut file = try_!(TempFile::new().await);
 
@@ -720,8 +753,8 @@ where
         };
 
         let _tx = machine
-            .add(
-                &self.provider,
+            .add_reader(
+                self.provider.deref(),
                 &mut wallet,
                 &key,
                 file,

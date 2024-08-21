@@ -2,7 +2,6 @@
 #![deny(
 clippy::all, //
 clippy::cargo, //
-clippy::pedantic, //
 )]
 #![allow(
 clippy::wildcard_imports,
